@@ -1,7 +1,17 @@
 #!/bin/sh
 
-# Copyright (C) 2007-2014 University of Oxford
-# Authors: Dave Flitney, Stephen Smith, Matthew Webster and Duncan Mortimer
+# Jul 2013 - set swarm to autobundle (Susan)
+
+# Mar 2012: FEAT was sending non-numeric job IDs as dependencies, e.g. -j featModelID which gets
+#   translated by this script to 'swarm ... -W=depend:afterok:featModelID' which fails.
+#   Modified this script to test for numeric value for -j flag. If non-numeric, the flag is ignored. (Susan)
+#
+# modified by Adam Thomas, adamt@nih.gov. Aug 2008 to use swarm instead of SGE
+# further modified by Susan, Sep 2009 
+
+
+# Copyright (C) 2007 University of Oxford
+# Authors: Dave Flitney & Stephen Smith
 
 #   Part of FSL - FMRIB's Software Library
 #   http://www.fmrib.ox.ac.uk/fsl
@@ -14,7 +24,7 @@
 #   
 #   LICENCE
 #   
-#   FMRIB Software Library, Release 5.0 (c) 2012, The University of
+#   FMRIB Software Library, Release 4.0 (c) 2007, The University of
 #   Oxford (the "Software")
 #   
 #   The Software remains the property of the University of Oxford ("the
@@ -63,8 +73,12 @@
 #   interested in using the Software commercially, please contact Isis
 #   Innovation Limited ("Isis"), the technology transfer company of the
 #   University, to negotiate a licence. Contact details are:
-#   innovation@isis.ox.ac.uk quoting reference DE/9564.
-export LC_ALL=C
+#   innovation@isis.ox.ac.uk quoting reference DE/1112.
+
+export FSLSUBVERBOSE=1
+
+
+
 
 ###########################################################################
 # Edit this file in order to setup FSL to use your local compute
@@ -74,35 +88,19 @@ export LC_ALL=C
 
 ###########################################################################
 # The following section determines what to do when fsl_sub is called
-# by an FSL program. If SGE_ROOT is set it will attempt to pass the
-# commands onto the cluster, otherwise it will run the commands
+# by an FSL program. If it finds a local cluster if will pass the
+# commands onto the cluster. Otherwise it will run the commands
 # itself. There are two values for the METHOD variable, "SGE" and
-# "NONE". Note that a user can unset SGE_ROOT if they don't want the
+# "NONE". You should setup the tests to look for whether the calling
+# computer can see your cluster setup scripts, and run them (if that's
+# what you want, i.e. if you haven't already run them in the user's
+# login scripts). Note that these tests look for the environment
+# variable SGE_ROOT, which a user can unset if they don't want the
 # cluster to be used.
 ###########################################################################
-METHOD=SGE
-unset module
-if [ "x$SGE_ROOT" = "x" ] ; then
-	METHOD=NONE
-else
-	QCONF=`which qconf`
-	if [ "x$QCONF" = "x" ]; then
-		METHOD=NONE
-		echo "Warning: SGE_ROOT environment variable is set but Grid Engine software not found, will run locally" >&2
-	fi
-fi
 
-# stop submitted scripts from submitting jobs themselves
-if [ "X$FSLSUBALREADYRUN" = "Xtrue" ] ; then
-    METHOD=NONE
-    echo "Warning: job on queue attempted to submit parallel jobs - running jobs serially instead" >&2
-fi
+METHOD=PBS
 
-if [ "X$METHOD" = "XNONE" ]; then
-	QCONF=echo
-fi
-FSLSUBALREADYRUN=true
-export FSLSUBALREADYRUN
 
 ###########################################################################
 # The following auto-decides what cluster queue to use. The calling
@@ -125,16 +123,14 @@ map_qname ()
     else
 	queue=verylong.q
     fi
-    queueCmd=" -q $queue " 
-
     #echo "Estimated time was $1 mins: queue name is $queue"
 }
+
 
 ###########################################################################
 # Don't change the following (but keep scrolling down!)
 ###########################################################################
 
-OLD_POSIXLY_CORRECT=${POSIXLY_CORRECT}
 POSIXLY_CORRECT=1
 export POSIXLY_CORRECT
 command=`basename $0`
@@ -143,46 +139,28 @@ usage ()
 {
   cat <<EOF
 
-$command V1.1 - wrapper for job control system such as SGE
+$command V1.0beta - wrapper for job control system such as PBS
 
-Usage: $command [options] <command>
+Usage: fsl_sub [options] <command>
 
 $command gzip *.img *.hdr
 $command -q short.q gzip *.img *.hdr
 $command -a darwin regscript rawdata outputdir ...
 
-  -T <minutes>          Estimated job length in minutes, used to auto-set queue name
-  -q <queuename>        Possible values for <queuename> are "verylong.q", "long.q" 
-                        and "short.q". See below for details
-                        Default is "long.q".
-  -a <arch-name>        Architecture [e.g., darwin or lx24-amd64]
-  -p <job-priority>     Lower priority [0:-1024] default = 0                 
-  -M <email-address>    Who to email, default = `whoami`@fmrib.ox.ac.uk 
+  -T <minutes>          Estimated job length in minutes, used to auto-set queue name **NOTUSED
+  -a <node type>        e.g. 'm4096' (4 GB memory) **NOTUSED
+  -M <email-address>    Who to email, default = `whoami`@fmrib.ox.ac.uk  **NOTUSED
   -j <jid>              Place a hold on this task until job jid has completed
   -t <filename>         Specify a task file of commands to execute in parallel
   -N <jobname>          Specify jobname as it will appear on queue
   -l <logdirname>       Where to output logfiles
-  -m <mailoptions>      Change the SGE mail options, see qsub for details
-  -z <output>           If <output> image or file already exists, do nothing and exit
-  -F                    Use flags embedded in scripts to set SGE queuing options
+  -m <mailoptions>      Change the PBS mail options, see qsub for details
+  -F                    Use flags embedded in scripts to set PBS queuing options
   -s <pename>,<threads> Submit a multi-threaded task - requires a PE (<pename>) to be
                         configured for the requested queues.
                         <threads> specifies the number of threads to run
+  -z <output>           If <output> image or file already exists, do nothing and exit
   -v                    Verbose mode.
-
-Queues:
-
-There are several batch queues configured on the cluster, each with defined CPU
-time limits. All queues, except bigmem.q, have a 8GB memory limit.
-
-veryshort.q:This queue is for jobs which last under 30mins.
-short.q:    This queue is for jobs which last up to 4h. 
-long.q:     This queue is for jobs which last less than 24h. Jobs run with a
-            nice value of 10.
-verylong.q: This queue is for jobs which will take longer than 24h CPU time.
-            There is one slot per node, and jobs on this queue have a nice value
-            of 15.
-bigmem.q:   This queue is like the verylong.q but has no memory limits.
 
 EOF
 
@@ -204,18 +182,6 @@ if [ $nargs -eq 0 ] || [ $result != 0 ] ; then
   usage
 fi
 
-POSIXLY_CORRECT=${OLD_POSIXLY_CORRECT}
-export POSIXLY_CORRECT
-
-
-###########################################################################
-# If you have a Parallel Environment configured for OpenMP tasks then
-# the variable omp_pe should be set to the name you have defined for that
-# PE. The script will work out which queues have that PE setup on them.
-# Note, we support openmp tasks even when Grid Engine is not in use.
-###########################################################################
-
-omp_pe='openmp'
 
 ###########################################################################
 # The following sets up the default queue name, which you may want to
@@ -223,8 +189,8 @@ omp_pe='openmp'
 ###########################################################################
 
 queue=long.q
-queueCmd=" -q long.q "
-mailto=`whoami`@fmrib.ox.ac.uk
+mailto=`whoami`@biobos.nih.gov
+#MailOpts="abe"
 MailOpts="a"
 
 
@@ -257,7 +223,8 @@ if [ -z $FSLSUBVERBOSE ] ; then
     verbose=0
 else
     verbose=$FSLSUBVERBOSE;
-    echo "METHOD=$METHOD : args=$@" >&2
+    echo "Input args=$@" >&2
+    echo "" >&2
 fi
 
 scriptmode=0
@@ -272,75 +239,39 @@ while [ $1 != -- ] ; do
     -T)
       map_qname $2
       shift;;
-    -q)
-      queue=$2
-      queueCmd=" -q $queue " 
-      $QCONF -sq $queue >/dev/null 2>&1
-      if [ $? -eq 1 ]; then
-	  echo "Invalid queue specified!"
-	  exit 127
-      fi
-      shift;;
     -a)
-      acceptable_arch=no
-      available_archs=`qhost | tail -n +4 | awk '{print $2}' | sort | uniq`
-      for a in $available_archs; do
-	if [ $2 = $a ] ; then
-	  acceptable_arch=yes
-	fi
-      done
-      if [ $acceptable_arch = yes ]; then
-	  sge_arch="-l arch=$2"
-      else
-	  echo "Sorry arch of $2 is not supported on this SGE configuration!"
-	  echo "Should be one of:" $available_archs
-	  exit 127
-      fi
-      shift;;
-    -p)
-      sge_priority="-p $2"
+      pbs_arch=":$2"
       shift;;
     -M)
       mailto=$2
       shift;;
     -j)
       jid=$2
-      sge_hold="-hold_jid $jid"
+      jid=${jid//biobos,/biobos:}
+      if echo $jid | grep "^[0-9]" > /dev/null
+          then
+          pbs_hold="-W depend=afterok:$jid"
+          else
+          echo "Warning: -j $jid is not a jobID. Ignoring the dependency" >&2
+          fi
       shift;;
     -t)
       taskfile=$2
-      if [ -f "$taskfile" ] ; then
-	      tasks=`wc -l $taskfile | awk '{print $1}'`
-	      if [ $tasks -ne 0 ]; then
-    	  	sge_tasks="-t 1-$tasks"
-    	  else
-    	    echo "Task file ${taskfile} is empty"
-    	    echo "Should be a text file listing all the commands to run!"
-    	    exit -1
-    	  fi
-      else
-          echo "Task file (${taskfile}) does not exist"
-          exit -1
-      fi
+      tasks=`wc -l $taskfile | awk '{print $1}'`
+      pbs_tasks="-t 1-$tasks"
       shift;;
     -N)
       JobName=$2;
       shift;;
-    -m)
-      MailOpts=$2;
-      shift;;
+# bedpost adds some SGE mail flags which don't work in PBS. Safer to ignore mail options
+#   when fsl_sub is called.
+#    -m)
+#      MailOpts=$2;
+#      shift;;
     -l)
-      LogOpts="-o $2 -e $2";
+      #LogOpts="-o $2 -e $2";
       LogDir="${2}/";
-      if [ ! -e ${2} ]; then 
-	  mkdir -p $2
-      else
-	  echo ${2} | grep '/dev/null' >/dev/null 2>&1
-	  if [ $? -eq 1 ] && [ -f ${2} ]; then
-	      echo "Log destination is a file (should be a folder)"
-	      exit -1
-	  fi
-      fi
+      mkdir -p $2;
       shift;;
     -F)
       scriptmode=1;
@@ -352,6 +283,7 @@ while [ $1 != -- ] ; do
       pe_string=$2;
       peName=`echo $pe_string | cut -d',' -f 1`
       peThreads=`echo $pe_string | cut -d',' -f 2`
+      peThreads="-t $peThreads"
       shift;;
   esac
   shift  # next flag
@@ -362,115 +294,84 @@ shift
 # Don't change the following (but keep scrolling down!)
 ###########################################################################
 
-if [ -z "$taskfile" ] && [ -z "$1" ]; then
-	echo "Either supply a command to run or a parallel task file"
-	exit -1
-fi
-
-if [ -z "$taskfile" ] && [ ! -x "$1" ]; then
-	which $1 >/dev/null 2>&1
-	if [ $? -ne 0 ]; then
-		echo "The command you have requested cannot be found or is not executable"
-		exit -1
-	fi
-fi
-
 if [ "x$JobName" = x ] ; then 
     if [ "x$taskfile" != x ] ; then
 	JobName=`basename $taskfile`
     else
 	JobName=`basename $1`
+	# Names must be all alphabetic characters. This is only a partial fix
+	JobName=${JobName//[-_.0-9]/}
+	# And they can only be 15 chars long.
+	JobName=${JobName:0:15}
     fi
 fi
 
-if [ "x$tasks" != "x" ] && [ "x$@" != "x" ] ; then
-    echo "Spurious input after parsing command line: \"$@\"!"
-    echo "You appear to have specified both a task file and a command to run"
+#date >> /tmp/agt_debug
+#echo jobname $JobName >> /tmp/agt_debug
+#echo taskfile $taskfile >> /tmp/agt_debug
+#echo arg1 $1 >> /tmp/agt_debug
+
+
+if [ "x$tasks" != x ] && [ ! -f "$taskfile" ] ; then
+    echo $taskfile: invalid input!
+    echo Should be a text file listing all the commands to run!
     exit -1
 fi
 
-if [ "x$peName" != "x" ]; then
-    # If the PE name is 'openmp' then limit the number of threads to those specified
-    
-    if [ "X$peName" = "X$omp_pe" ]; then
-        OMP_NUM_THREADS=$peThreads
-	export OMP_NUM_THREADS
-    fi
-
+if [ "x$tasks" != "x" ] && [ "x$@" != "x" ] ; then
+    echo $@
+    echo Spurious input after parsing command line!
+    exit -1
 fi
 
 case $METHOD in
 
 ###########################################################################
-# The following is the main call to the cluster, using the "qsub" SGE
+# The following is the main call to the cluster, using the "qsub" PBS
 # program. If $tasks has not been set then qsub is running a single
 # command, otherwise qsub is processing a text file of parallel
 # commands.
 ###########################################################################
 
-    SGE)
-       ###########################################################################
-       # Test Parallel environment options
-       ###########################################################################
-	if [ "x$peName" != x ]; then
-            # Is this a configured PE?
-
-	    $QCONF -sp $peName >/dev/null 2>&1
-
-	    if [ $? -eq 1 ]; then
-		echo $@
-		echo "$peName is not a valid PE"
-		exit -1
-	    fi
-
-            # Get a list of queues configured for this PE and confirm that the queue
-            # we have submitted to has that PE set up.
-	    qstat -g c -pe $peName >/dev/null 2>&1
-	    if [ $? -eq 1 ]; then
-		echo "No parallel environments configured!"
-		exit -1
-	    fi
-
-	    qstat -g c -pe $peName | sed '1,2d' | awk '{ print $1 }' | grep ^$queue >/dev/null 2>&1
-
-	    if [ $? -eq 1 ]; then
-		echo $@
-		echo "PE $peName is not configured on $queue"
-		exit -1
-	    fi
-
-	    # The -w e option will result in the job failing if there are insufficient slots
-            # on any of the cluster nodes
-	    pe_options="-pe $peName $peThreads -w e"
-
-	fi
-
+    PBS)
 	if [ "x$tasks" = "x" ] ; then
-	    if [ $scriptmode -ne 1 ] ; then
-		sge_command="qsub -V -cwd -shell n -b y -r y $queueCmd $pe_options -M $mailto -N $JobName -m $MailOpts $LogOpts $sge_arch $sge_hold"
-	    else
-		sge_command="qsub $LogOpts $sge_arch $sge_hold"
-	    fi
+		pid=$$
+		echo $@ "; rm `pwd`/cmd.$pid" > cmd.$pid
+		chmod +x cmd.$pid
+		pbs_command="swarm -R gpfs --autobundle -g 4 -f cmd.$pid -V $LogOpts $pbs_hold $peThreads -j oe"
+#	    if [ $scriptmode -ne 1 ] ; then
+#		pbs_command="qsub -V -cwd -shell n -b y -r y -q $queue -M $mailto -N $JobName -m $MailOpts $LogOpts $pbs_arch $pbs_hold"
+#	    else
+#		pbs_command="qsub $LogOpts $pbs_arch $pbs_hold"
+#	    fi
 	    if [ $verbose -eq 1 ] ; then 
-		echo sge_command: $sge_command >&2
+		echo pbs_command: $pbs_command >&2
 		echo executing: $@ >&2
 	    fi
-	    exec $sge_command $@ | awk '{print $3}'
+#	    exec $pbs_command $@ | awk '{print $3}'
+#	    date >> /tmp/agt_debug
+#	    echo $pbs_command >> /tmp/agt_debug
+	    exec $pbs_command
 	else
-	    sge_command="qsub -V -cwd $queueCmd $pe_options -M $mailto -N $JobName -m $MailOpts $LogOpts $sge_arch $sge_hold $sge_tasks"
-	    if [ $verbose -eq 1 ] ; then 
-		echo sge_command: $sge_command >&2
+	    #pbs_command="qsub -V -cwd -M $mailto -N $JobName -m $MailOpts $LogOpts $pbs_hold $pbs_tasks"
+	   pbs_command="swarm -R gpfs --autobundle -g 4 -f $taskfile $pbs_hold -V $peThreads -j oe --singleout -v FSLOUTPUTTYPE=$FSLOUTPUTTYPE"; 
+	   if [ $verbose -eq 1 ] ; then 
+		echo pbs_command: $pbs_command >&2
 		echo control file: $taskfile >&2
 	    fi
-	    exec $sge_command <<EOF | awk '{print $3}' | awk -F. '{print $1}'
-#!/bin/sh
+            ID=`swarm -R gpfs --autobundle -g 4 -f $taskfile $pbs_hold -V $peThreads --singleout -v FSLOUTPUTTYPE=$FSLOUTPUTTYPE`
+            ID=${ID//biobos?/biobos:} 
+            echo $ID
 
-#$ -S /bin/sh
-
-command=\`sed -n -e "\${SGE_TASK_ID}p" $taskfile\`
-
-exec /bin/sh -c "\$command"
-EOF
+#	    exec $pbs_command <<EOF | awk '{print $3}' | awk -F. '{print $1}'
+##!/bin/sh
+#
+##$ -S /bin/sh
+#
+#command=\`sed -n -e "\${PBS_TASK_ID}p" $taskfile\`
+#
+#exec /bin/sh -c "\$command"
+#EOF
 	fi
 	;;
 
@@ -488,11 +389,6 @@ EOF
 	    /bin/sh <<EOF1 > ${LogDir}${JobName}.o$$ 2> ${LogDir}${JobName}.e$$
 $@
 EOF1
-	    ERR=$?
-	    if [ $ERR -ne 0 ] ; then
-		cat ${LogDir}${JobName}.e$$ >&2
-		exit $ERR
-	    fi
 	else
 	    if [ $verbose -eq 1 ] ; then 
 		echo "Running commands in: $taskfile" >&2
