@@ -1,17 +1,10 @@
 #!/bin/sh
 
-# Jul 2013 - set swarm to autobundle (Susan)
+set -e 
 
-# Mar 2012: FEAT was sending non-numeric job IDs as dependencies, e.g. -j featModelID which gets
-#   translated by this script to 'swarm ... -W=depend:afterok:featModelID' which fails.
-#   Modified this script to test for numeric value for -j flag. If non-numeric, the flag is ignored. (Susan)
-#
-# modified by Adam Thomas, adamt@nih.gov. Aug 2008 to use swarm instead of SGE
-# further modified by Susan, Sep 2009 
-
-
-# Copyright (C) 2007 University of Oxford
-# Authors: Dave Flitney & Stephen Smith
+# Copyright (C) 2007-2010 University of Oxford
+# Authors: Dave Flitney, Stephen Smith and Matthew Webster
+# Modified by Adam Thomas & Susan Chacko to work on NIH Biowulf PBS systemn
 
 #   Part of FSL - FMRIB's Software Library
 #   http://www.fmrib.ox.ac.uk/fsl
@@ -24,7 +17,7 @@
 #   
 #   LICENCE
 #   
-#   FMRIB Software Library, Release 4.0 (c) 2007, The University of
+#   FMRIB Software Library, Release 5.0 (c) 2012, The University of
 #   Oxford (the "Software")
 #   
 #   The Software remains the property of the University of Oxford ("the
@@ -73,12 +66,7 @@
 #   interested in using the Software commercially, please contact Isis
 #   Innovation Limited ("Isis"), the technology transfer company of the
 #   University, to negotiate a licence. Contact details are:
-#   innovation@isis.ox.ac.uk quoting reference DE/1112.
-
-export FSLSUBVERBOSE=1
-
-
-
+#   innovation@isis.ox.ac.uk quoting reference DE/9564.
 
 ###########################################################################
 # Edit this file in order to setup FSL to use your local compute
@@ -99,7 +87,19 @@ export FSLSUBVERBOSE=1
 # cluster to be used.
 ###########################################################################
 
+METHOD=SGE
 METHOD=PBS
+if [ $METHOD = "SGE" ] && [ "x$SGE_ROOT" = "x" ] ; then
+    if [ -f /usr/local/share/sge/default/common/settings.sh ] ; then
+	. /usr/local/share/sge/default/common/settings.sh
+    elif [ -f /usr/local/sge/default/common/settings.sh ] ; then
+	. /usr/local/sge/default/common/settings.sh
+    else
+	METHOD=NONE
+    fi
+fi
+if [ `hostname` = "helix.nih.gov" ] ; then METHOD=NONE;fi
+if [ ! -z $NOPBS] && [ $NOPBS = true ];then METHOD=NONE;fi
 
 
 ###########################################################################
@@ -126,7 +126,6 @@ map_qname ()
     #echo "Estimated time was $1 mins: queue name is $queue"
 }
 
-
 ###########################################################################
 # Don't change the following (but keep scrolling down!)
 ###########################################################################
@@ -139,28 +138,47 @@ usage ()
 {
   cat <<EOF
 
-$command V1.0beta - wrapper for job control system such as PBS
+$command V1.1 - wrapper for job control system such as SGE
 
-Usage: fsl_sub [options] <command>
+Usage: $command [options] <command>
 
 $command gzip *.img *.hdr
 $command -q short.q gzip *.img *.hdr
 $command -a darwin regscript rawdata outputdir ...
 
-  -T <minutes>          Estimated job length in minutes, used to auto-set queue name **NOTUSED
-  -a <node type>        e.g. 'm4096' (4 GB memory) **NOTUSED
-  -M <email-address>    Who to email, default = `whoami`@fmrib.ox.ac.uk  **NOTUSED
+  -T <minutes>          Estimated job length in minutes, used to auto-set queue name
+  -q <queuename>        Possible values for <queuename> are "verylong.q", "long.q" ## NOT USED
+                        and "short.q". See below for details
+                        Default is "long.q".
+  -a <arch-name>        Architecture [e.g., darwin or lx24-amd64]
+  -p <job-priority>     Lower priority [0:-1024] default = 0                 
+  -M <email-address>    Who to email, default = `whoami`@fmrib.ox.ac.uk 
   -j <jid>              Place a hold on this task until job jid has completed
   -t <filename>         Specify a task file of commands to execute in parallel
   -N <jobname>          Specify jobname as it will appear on queue
   -l <logdirname>       Where to output logfiles
-  -m <mailoptions>      Change the PBS mail options, see qsub for details
-  -F                    Use flags embedded in scripts to set PBS queuing options
+  -m <mailoptions>      Change the SGE mail options, see qsub for details
+  -z <output>           If <output> image or file already exists, do nothing and exit
+  -F                    Use flags embedded in scripts to set SGE queuing options
   -s <pename>,<threads> Submit a multi-threaded task - requires a PE (<pename>) to be
                         configured for the requested queues.
                         <threads> specifies the number of threads to run
-  -z <output>           If <output> image or file already exists, do nothing and exit
   -v                    Verbose mode.
+  -g <mem>              Requested memory amount on cluster node.  
+
+Queues:
+
+There are several batch queues configured on the cluster, each with defined CPU
+time limits. All queues, except bigmem.q, have a 8GB memory limit.
+
+veryshort.q:This queue is for jobs which last under 30mins.
+short.q:    This queue is for jobs which last up to 4h. 
+long.q:     This queue is for jobs which last less than 24h. Jobs run with a
+            nice value of 10.
+verylong.q: This queue is for jobs which will take longer than 24h CPU time.
+            There is one slot per node, and jobs on this queue have a nice value
+            of 15.
+bigmem.q:   This queue is like the verylong.q but has no memory limits.
 
 EOF
 
@@ -172,7 +190,7 @@ if [ $nargs -eq 0 ] ; then
   usage
 fi
 
-set -- `getopt T:q:a:p:M:j:t:z:N:Fvm:l:s: $*`
+set -- `getopt g:T:q:a:p:M:j:t:z:N:Fvm:l:s: $*`
 result=$?
 if [ $result != 0 ] ; then
   echo "What? Your arguments make no sense!"
@@ -182,6 +200,14 @@ if [ $nargs -eq 0 ] || [ $result != 0 ] ; then
   usage
 fi
 
+###########################################################################
+# If you have a Parallel Environment configured for OpenMP tasks then
+# the variable omp_pe should be set to the name you have defined for that
+# PE. The script will work out which queues have that PE setup on them.
+# Note, we support openmp tasks even when Grid Engine is not in use.
+###########################################################################
+
+omp_pe='openmp'
 
 ###########################################################################
 # The following sets up the default queue name, which you may want to
@@ -190,7 +216,6 @@ fi
 
 queue=long.q
 mailto=`whoami`@biobos.nih.gov
-#MailOpts="abe"
 MailOpts="a"
 
 
@@ -223,11 +248,12 @@ if [ -z $FSLSUBVERBOSE ] ; then
     verbose=0
 else
     verbose=$FSLSUBVERBOSE;
-    echo "Input args=$@" >&2
-    echo "" >&2
+    echo "METHOD=$METHOD : args=$@" >&2
 fi
 
 scriptmode=0
+#pbs_arch=":c4 -n 4" 
+shell="--usecsh"
 
 while [ $1 != -- ] ; do
   case $1 in
@@ -239,42 +265,65 @@ while [ $1 != -- ] ; do
     -T)
       map_qname $2
       shift;;
+    -q)
+      queue=$2
+      # Biowulf only has one queue
+      # qconf -sql | grep ^$queue 2>&1 >/dev/null
+      # if [ $? -eq 1 ]; then
+      #	  echo "Invalid queue specified!"
+      #	  exit 127
+      # fi
+      shift;;
     -a)
-      pbs_arch=":$2"
+# Not Used
+#      acceptable_arch=no
+#      available_archs=`qhost | tail -n +4 | awk '{print $2}' | sort | uniq`
+#      for a in $available_archs; do
+#	if [ $2 = $a ] ; then
+#	  acceptable_arch=yes
+#	fi
+#      done
+#      if [ $acceptable_arch = yes ]; then
+#	  sge_arch="-l arch=$2"
+#      else
+#	  echo "Sorry arch of $2 is not supported on this SGE configuration!"
+#	  echo "Should be one of:" $available_archs
+#	  exit 127
+#      fi
+      shift;;
+    -p)
+      sge_priority="-p $2"
       shift;;
     -M)
       mailto=$2
       shift;;
     -j)
       jid=$2
+      sge_hold="-hold_jid $jid"
       jid=${jid//biobos,/biobos:}
-      if echo $jid | grep "^[0-9]" > /dev/null
-          then
-          pbs_hold="-W depend=afterok:$jid"
-          else
-          echo "Warning: -j $jid is not a jobID. Ignoring the dependency" >&2
-          fi
+      pbs_hold="-W depend=afterok:$jid"
       shift;;
     -t)
       taskfile=$2
       tasks=`wc -l $taskfile | awk '{print $1}'`
+#      sge_tasks="-t 1-$tasks"
       pbs_tasks="-t 1-$tasks"
       shift;;
     -N)
       JobName=$2;
       shift;;
-# bedpost adds some SGE mail flags which don't work in PBS. Safer to ignore mail options
-#   when fsl_sub is called.
-#    -m)
+    -m)
 #      MailOpts=$2;
-#      shift;;
+      shift;;
     -l)
-      #LogOpts="-o $2 -e $2";
-      LogDir="${2}/";
-      mkdir -p $2;
+#      LogOpts="-o $2 -e $2";
+#      LogDir="${2}/";
+#      mkdir -p $2;
       shift;;
     -F)
       scriptmode=1;
+      echo "Flags in scripts have not been tested on the biowulf"
+      exit
       ;;
     -v)
       verbose=1
@@ -283,7 +332,9 @@ while [ $1 != -- ] ; do
       pe_string=$2;
       peName=`echo $pe_string | cut -d',' -f 1`
       peThreads=`echo $pe_string | cut -d',' -f 2`
-      peThreads="-t $peThreads"
+      shift;;
+    -g)
+      mem="-g $2";
       shift;;
   esac
   shift  # next flag
@@ -297,20 +348,18 @@ shift
 if [ "x$JobName" = x ] ; then 
     if [ "x$taskfile" != x ] ; then
 	JobName=`basename $taskfile`
-    else
+	# Names must be all alphabetic characters. This is only a partial fix
+	JobName=${JobName//[-_.0-9]/}
+	# And they can only be 15 chars long.
+	JobName=${JobName:0:15}
+     else
 	JobName=`basename $1`
 	# Names must be all alphabetic characters. This is only a partial fix
 	JobName=${JobName//[-_.0-9]/}
 	# And they can only be 15 chars long.
 	JobName=${JobName:0:15}
-    fi
+     fi
 fi
-
-#date >> /tmp/agt_debug
-#echo jobname $JobName >> /tmp/agt_debug
-#echo taskfile $taskfile >> /tmp/agt_debug
-#echo arg1 $1 >> /tmp/agt_debug
-
 
 if [ "x$tasks" != x ] && [ ! -f "$taskfile" ] ; then
     echo $taskfile: invalid input!
@@ -324,54 +373,112 @@ if [ "x$tasks" != "x" ] && [ "x$@" != "x" ] ; then
     exit -1
 fi
 
+# Minimum of 2GB is needed for most FSL commands
+if [ "x$mem" = "x" ] ; then mem="-g 4";fi
+
+if [ "x$peName" != "x" ]; then
+    # If the PE name is 'openmp' then limit the number of threads to those specified
+    
+    if [ "X$peName" = "X$omp_pe" ]; then
+        OMP_NUM_THREADS=$peThreads
+	export OMP_NUM_THREADS
+    fi
+
+fi
+
 case $METHOD in
 
 ###########################################################################
-# The following is the main call to the cluster, using the "qsub" PBS
+# The following is the main call to the cluster, using the "qsub" SGE
 # program. If $tasks has not been set then qsub is running a single
 # command, otherwise qsub is processing a text file of parallel
 # commands.
 ###########################################################################
 
+    SGE)
+       ###########################################################################
+       # Test Parallel environment options
+       ###########################################################################
+	if [ "x$peName" != x ]; then
+            # Is this a configured PE?
+
+	    qconf -spl | grep ^$peName 2>&1 >/dev/null
+
+	    if [ $? -eq 1 ]; then
+		echo $@
+		echo "$peName is not a valid PE"
+		exit -1
+	    fi
+
+            # Get a list of queues configured for this PE and confirm that the queue
+            # we have submitted to has that PE set up.
+	    qstat -g c -pe $peName 2>&1 >/dev/null
+	    if [ $? -eq 1 ]; then
+		echo "No parallel environments configured!"
+		exit -1
+	    fi
+
+	    qstat -g c -pe $peName | sed '1,2d' | awk '{ print $1 }' | grep ^$queue 2>&1 >/dev/null
+
+	    if [ $? -eq 1 ]; then
+		echo $@
+		echo "PE $peName is not configured on $queue"
+		exit -1
+	    fi
+
+	    # The -w e option will result in the job failing if there are insufficient slots
+            # on any of the cluster nodes
+	    pe_options="-pe $peName $peThreads -w e"
+
+	fi
+
+	if [ "x$tasks" = "x" ] ; then
+	    if [ $scriptmode -ne 1 ] ; then
+		sge_command="qsub -V -cwd -shell n -b y -r y -q $queue $pe_options -M $mailto -N $JobName -m $MailOpts $LogOpts $sge_arch $sge_hold"
+	    else
+		sge_command="qsub $LogOpts $sge_arch $sge_hold"
+	    fi
+	    if [ $verbose -eq 1 ] ; then 
+		echo sge_command: $sge_command >&2
+		echo executing: $@ >&2
+	    fi
+	    exec $sge_command $@ | awk '{print $3}'
+	else
+	    sge_command="qsub -V -cwd -q $queue $pe_options -M $mailto -N $JobName -m $MailOpts $LogOpts $sge_arch $sge_hold $sge_tasks"
+	    if [ $verbose -eq 1 ] ; then 
+		echo sge_command: $sge_command >&2
+		echo control file: $taskfile >&2
+	    fi
+	    exec $sge_command <<EOF | awk '{print $3}' | awk -F. '{print $1}'
+#!/bin/sh
+
+#$ -S /bin/sh
+
+command=\`sed -n -e "\${SGE_TASK_ID}p" $taskfile\`
+
+exec /bin/sh -c "\$command"
+EOF
+	fi
+	;;
     PBS)
 	if [ "x$tasks" = "x" ] ; then
 		pid=$$
-		echo $@ "; rm `pwd`/cmd.$pid" > cmd.$pid
+		echo $@ > cmd.$pid
 		chmod +x cmd.$pid
-		pbs_command="swarm -R gpfs --autobundle -g 4 -f cmd.$pid -V $LogOpts $pbs_hold $peThreads -j oe"
-#	    if [ $scriptmode -ne 1 ] ; then
-#		pbs_command="qsub -V -cwd -shell n -b y -r y -q $queue -M $mailto -N $JobName -m $MailOpts $LogOpts $pbs_arch $pbs_hold"
-#	    else
-#		pbs_command="qsub $LogOpts $pbs_arch $pbs_hold"
-#	    fi
-	    if [ $verbose -eq 1 ] ; then 
-		echo pbs_command: $pbs_command >&2
-		echo executing: $@ >&2
-	    fi
-#	    exec $pbs_command $@ | awk '{print $3}'
-#	    date >> /tmp/agt_debug
-#	    echo $pbs_command >> /tmp/agt_debug
-	    exec $pbs_command
+		pbs_command="swarm -R gpfs -q nimh -f cmd.$pid $shell -V -r y -M $mailto -N $JobName -m $MailOpts $LogOpts $pbs_hold $mem"
+		if [ $verbose -eq 1 ] ; then 
+		    echo pbs_command: $pbs_command >&2
+		    echo executing: $@ >&2
+		fi	    
+		exec $pbs_command
 	else
-	    #pbs_command="qsub -V -cwd -M $mailto -N $JobName -m $MailOpts $LogOpts $pbs_hold $pbs_tasks"
-	   pbs_command="swarm -R gpfs --autobundle -g 4 -f $taskfile $pbs_hold -V $peThreads -j oe --singleout -v FSLOUTPUTTYPE=$FSLOUTPUTTYPE"; 
-	   if [ $verbose -eq 1 ] ; then 
+	    if [ $verbose -eq 1 ] ; then 
 		echo pbs_command: $pbs_command >&2
 		echo control file: $taskfile >&2
 	    fi
-            ID=`swarm -R gpfs --autobundle -g 4 -f $taskfile $pbs_hold -V $peThreads --singleout -v FSLOUTPUTTYPE=$FSLOUTPUTTYPE`
-            ID=${ID//biobos?/biobos:} 
-            echo $ID
-
-#	    exec $pbs_command <<EOF | awk '{print $3}' | awk -F. '{print $1}'
-##!/bin/sh
-#
-##$ -S /bin/sh
-#
-#command=\`sed -n -e "\${PBS_TASK_ID}p" $taskfile\`
-#
-#exec /bin/sh -c "\$command"
-#EOF
+	    ID=`swarm -R gpfs -q nimh -f $taskfile $shell -V $pbs_hold -N $JobName $mem`
+	    ID=${ID//biobos?/biobos:} 
+	    echo $ID
 	fi
 	;;
 
@@ -389,6 +496,11 @@ case $METHOD in
 	    /bin/sh <<EOF1 > ${LogDir}${JobName}.o$$ 2> ${LogDir}${JobName}.e$$
 $@
 EOF1
+	    ERR=$?
+	    if [ $ERR -ne 0 ] ; then
+		cat ${LogDir}${JobName}.e$$ >&2
+		exit $ERR
+	    fi
 	else
 	    if [ $verbose -eq 1 ] ; then 
 		echo "Running commands in: $taskfile" >&2
